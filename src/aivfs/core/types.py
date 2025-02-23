@@ -87,7 +87,7 @@ class FileMetadata:
                 (not check_perm.write or self.group_perm.write) and
                 (not check_perm.execute or self.group_perm.execute)
             )
-            
+
         return (
             (not check_perm.read or self.other_perm.read) and
             (not check_perm.write or self.other_perm.write) and

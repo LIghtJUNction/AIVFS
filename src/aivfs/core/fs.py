@@ -33,17 +33,56 @@ class AIVFS:
     def _init_fs_structure(self):
         """初始化文件系统结构"""
         # 创建根目录
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / '.aivroot').touch()
-
-        # 创建基本目录结构，使用fs_ops确保创建元数据
-        dirs = ['bin', 'etc', 'home', 'var', 'tmp']
-        for d in dirs:
-            self.fs_ops.mkdir(d, 
-                             owner="root", 
-                             group="root", 
-                             mode=(7, 5, 5),  # rwxr-xr-x
-                             exist_ok=True)  # 添加 exist_ok=True
+        self.fs_ops.mkdir('/', 
+                          owner="root", 
+                          group="root", 
+                          mode=(7, 5, 5),  # rwxr-xr-x
+                          parents=True,
+                          exist_ok=True)
+        
+        # 创建.aivroot文件
+        self.fs_ops.create_file('/.aivroot', 
+                               content="", 
+                               owner="root", 
+                               group="root", 
+                               mode=(6, 4, 4))  # rw-r--r--
+        
+        # 基本目录结构和权限配置
+        dir_configs = {
+            'bin': {  # 可执行文件目录
+                'owner': 'root',
+                'group': 'root',
+                'mode': (7, 5, 5)  # rwxr-xr-x - 所有用户可执行
+            },
+            'etc': {  # 系统配置目录
+                'owner': 'root',
+                'group': 'root',
+                'mode': (7, 4, 4)  # rwxr--r-- - 仅root可写
+            },
+            'home': {  # 用户目录
+                'owner': 'root',
+                'group': 'users',
+                'mode': (7, 5, 5)  # rwxr-xr-x - 所有用户可访问
+            },
+            'var': {  # 可变数据目录
+                'owner': 'root',
+                'group': 'root',
+                'mode': (7, 5, 0)  # rwxr-x--- - 仅系统用户可访问
+            },
+            'tmp': {  # 临时文件目录
+                'owner': 'root',
+                'group': 'users',
+                'mode': (7, 7, 7)  # rwxrwxrwx - 所有用户完全访问
+            }
+        }
+        
+        # 创建目录并设置相应权限
+        for dir_name, config in dir_configs.items():
+            self.fs_ops.mkdir(f'/{dir_name}', 
+                             owner=config['owner'],
+                             group=config['group'],
+                             mode=config['mode'],
+                             exist_ok=True)
     
     def create_file(self, path: str, content: str = "", owner: str = "root", 
                    group: str = "root", mode: tuple = (6, 4, 4)) -> None:
