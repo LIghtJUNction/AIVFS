@@ -8,7 +8,7 @@ def print_separator(title: str):
 
 try:
     # 初始化文件系统
-    fs = aivfs.init(force=True)
+    fs = aivfs.mount()
 
     # 测试基本文件系统操作
     print_separator("1. 测试基本功能")
@@ -20,14 +20,16 @@ try:
     root_meta = fs.get_metadata('/')
     print(f"根目录元数据: {root_meta}")
 
-    # 测试文件操作
-    print_separator("3. 测试文件操作")
-    fs.write_file('/test.txt', 'Hello, AIVFS!')
-    print(f"文件存在: {fs.exists('/test.txt')}")
-    print(f"文件内容: {fs.read_file('/test.txt')}")
+    # # 测试文件操作
+    # print_separator("3. 测试文件操作")
+    # fs.write_file('/test.txt', 'Hello, AIVFS!')
+    # fs.write_file('/flag.txt', '恭喜,你已获得root权限')
+    # print(f"文件存在: {fs.exists('/test.txt')}")
+    # print(f"文件内容: {fs.read_file('/test.txt')}")
 
     # 测试文件元数据
-    file_meta = fs.get_metadata('/test.txt')
+    file_meta = fs.get_metadata('/flag.txt')
+    print(f"文件元数据: {file_meta}")
     print(f"文件大小: {file_meta.size} bytes")
     print(f"文件所有者: {file_meta.owner}")
     print(f"文件权限: {file_meta.user_perm}-{file_meta.group_perm}-{file_meta.other_perm}")
