@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
-from typing import Optional, Set
+from pathlib import Path
+from typing import Optional, Set, Union
 
 class FileType(Enum):
     """文件类型枚举"""
@@ -93,3 +94,43 @@ class FileMetadata:
             (not check_perm.write or self.other_perm.write) and
             (not check_perm.execute or self.other_perm.execute)
         )
+    
+@dataclass
+class FileMode:
+    """文件权限模式类"""
+    user: Permission
+    group: Permission
+    other: Permission
+    
+    def __init__(self, user: int, group: int, other: int):
+        """从数字模式创建权限模式对象
+        
+        Args:
+            user: 用户权限（0-7）
+            group: 组权限（0-7）
+            other: 其他用户权限（0-7）
+        """
+        self.user = Permission.from_mode(user)
+        self.group = Permission.from_mode(group)
+        self.other = Permission.from_mode(other)
+    
+    def to_unix_style(self) -> str:
+        """转换为Unix风格的权限字符串"""
+        return (
+            self.user.to_unix_style() +
+            self.group.to_unix_style() +
+            self.other.to_unix_style()
+        )
+    
+    def to_mode(self) -> int:
+        """转换为完整数字模式"""
+        return (
+            self.user.to_mode() << 6 |
+            self.group.to_mode() << 3 |
+            self.other.to_mode()
+        )
+
+
+# 定义PathLike类型
+PathLike = Union[str, Path]
+

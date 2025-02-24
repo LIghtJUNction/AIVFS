@@ -2,210 +2,313 @@ from pathlib import Path
 import shutil
 import os
 from datetime import datetime
-from typing import Optional, Union, List
+from typing import Optional, List, Dict, Union, Callable
+from functools import wraps
 from ..metadata.manager import MetadataManager
-from .interfaces import IMetadataManager
-from .types import FileType, Permission, FileMetadata
+from .interfaces import IMetadataManager, IFSOperations
+from .types import FileType, FileMetadata, PathLike, FileMode
+from .exceptions import (
+    FileNotFoundError, FileExistsError, IsADirectoryError, MetadataError,
+    NotADirectoryError, PermissionError, InvalidPathError,
+    FileSystemError
+)
 
-class FSOperations:
-    """文件系统操作类"""
+def validate_path(func: Callable) -> Callable:
+    """路径验证装饰器"""
+    @wraps(func)
+    def wrapper(self, path: PathLike, *args, **kwargs):
+        if not path:
+            raise InvalidPathError("路径不能为空")
+        path_str = str(path)
+        if not path_str.startswith('/'):
+            raise InvalidPathError(path_str, "必须使用绝对路径")
+        return func(self, path, *args, **kwargs)
+    return wrapper
+
+class FSOperations(IFSOperations):
+    """文件系统操作类
+    
+    提供基本的文件系统操作，包括：
+    - 文件读写
+    - 目录管理
+    - 元数据操作
+    - 权限控制
+    """
     
     def __init__(self, root: Path, metadata: IMetadataManager):
-        self.root = root
-        self.metadata = metadata
-        if isinstance(metadata, MetadataManager):
-            metadata.set_fs_ops(self)
-
-    def _normalize_path(self, path: str) -> Path:
-        """规范化路径"""
-        return self.root / path.lstrip('/')
-
-    def create_file(self, path: str, content: str = "", 
-                   owner: str = "root", group: str = "root", 
-                   mode: tuple = (6, 4, 4)) -> None:
-        """创建文件并更新元数据"""
-        real_path = self._normalize_path(path)
-        real_path.parent.mkdir(parents=True, exist_ok=True)
-        real_path.write_text(content, encoding='utf-8')
-        
-        self._update_metadata(path, FileType.REGULAR, owner, group, mode)
-
-    def append_file(self, path: str, content: str) -> None:
-        """在文件末尾追加内容
+        """初始化文件系统操作
         
         Args:
-            path: 文件路径
-            content: 要追加的内容
-            
-        Raises:
-            FileNotFoundError: 文件不存在
-            IsADirectoryError: 目标是目录
+            root: 文件系统根目录
+            metadata: 元数据管理器实例
         """
-        real_path = self._normalize_path(path)
+        self.root = root.absolute()
+        self.metadata = metadata
+        # 使用接口类型而不是具体实现
+        metadata.set_fs_ops(self)
         
+        # 缓存常用路径的真实路径
+        self._path_cache: Dict[str, Path] = {}
+
+    def _normalize_path(self, path: PathLike) -> Path:
+        """规范化路径并使用缓存
+        
+        Args:
+            path: 原始路径
+            
+        Returns:
+            Path: 规范化后的绝对路径
+        """
+        path_str = str(path)
+        if path_str in self._path_cache:
+            return self._path_cache[path_str]
+        
+        normalized = self.root / path_str.lstrip('/')
+        self._path_cache[path_str] = normalized
+        return normalized
+
+    @validate_path
+    def write_file(self, path: PathLike, content: str, *, 
+                  owner: str = "root", group: str = "root",
+                  mode: FileMode = FileMode(6, 4, 4)) -> None:
+        """写入文件内容"""
+        real_path = self._normalize_path(path)
+        if real_path.exists():
+            if real_path.is_dir():
+                raise IsADirectoryError(str(path))
+            # 检查是否有写权限
+            if not os.access(real_path, os.W_OK):
+                raise PermissionError(str(path), "write", "没有写入权限")
+        
+        try:
+            # 确保父目录存在
+            real_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 使用临时文件写入
+            temp_path = real_path.with_suffix('.tmp')
+            temp_path.write_text(content, encoding='utf-8')
+            temp_path.replace(real_path)
+            
+            # 更新元数据
+            self._update_metadata(path, FileType.REGULAR, owner, group, mode)
+        except OSError as e:
+            raise FileSystemError(f"写入文件失败: {e}")
+        finally:
+            # 清理临时文件
+            if temp_path.exists():
+                temp_path.unlink()
+
+    @validate_path
+    def read_file(self, path: PathLike) -> str:
+        """读取文件内容"""
+        real_path = self._normalize_path(path)
+        if not real_path.exists():
+            raise FileNotFoundError(str(path))
+        if real_path.is_dir():
+            raise IsADirectoryError(str(path))
+        if not os.access(real_path, os.R_OK):
+            raise PermissionError(str(path), "read", "没有读取权限")
+            
+        try:
+            return real_path.read_text(encoding='utf-8')
+        except OSError as e:
+            raise FileSystemError(f"读取文件失败: {e}")
+
+    def append_file(self, path: PathLike, content: str) -> None:
+        """在文件末尾追加内容"""
+        real_path = self._normalize_path(path)
         if not real_path.exists():
             raise FileNotFoundError(f"文件不存在: {path}")
-            
         if real_path.is_dir():
             raise IsADirectoryError(f"目标是目录: {path}")
         
-        # 追加内容
         with real_path.open('a', encoding='utf-8') as f:
             f.write(content)
         
-        # 更新元数据中的文件大小和修改时间
-        metadata = self.metadata.get_file(path)
+        metadata = self.get_metadata(path)
         if metadata:
             metadata.size = real_path.stat().st_size
             metadata.modified_at = datetime.now()
-            self.metadata.add_file(metadata)
+            self.metadata.upsert(metadata)
 
-    def mkdir(self, path: str, owner: str = "root", group: str = "root",
-             mode: tuple = (7, 5, 5), parents: bool = False, 
-             exist_ok: bool = False) -> None:
+    # 目录操作
+    def mkdir(self, path: PathLike, *, 
+             owner: str = "root", group: str = "root",
+             mode: FileMode = FileMode(7, 5, 5),
+             parents: bool = False, exist_ok: bool = False) -> None:
         """创建目录"""
         real_path = self._normalize_path(path)
-        
-        if real_path.exists() and not exist_ok:
-            raise FileExistsError(f"目录已存在: {path}")
-            
+        if real_path.exists():
+            if not exist_ok:
+                raise FileExistsError(str(path))
+            if not real_path.is_dir():
+                raise NotADirectoryError(str(path))
         real_path.mkdir(parents=parents, exist_ok=exist_ok)
         self._update_metadata(path, FileType.DIRECTORY, owner, group, mode)
 
-    def makedirs(self, path: str, owner: str = "root", group: str = "root",
-                mode: tuple = (7, 5, 5), exist_ok: bool = False) -> None:
-        """递归创建目录"""
-        self.mkdir(path, owner, group, mode, parents=True, exist_ok=exist_ok)
+    # 路径操作
+    def remove(self, path: PathLike, recursive: bool = False) -> None:
+        """删除文件或目录"""
+        real_path = self._normalize_path(path)
+        if not real_path.exists():
+            raise FileNotFoundError(f"路径不存在: {path}")
+        if real_path.is_dir():
+            if not recursive:
+                raise IsADirectoryError(f"目标是目录，需要设置recursive=True: {path}")
+            self._remove_tree(real_path)
+        else:
+            real_path.unlink()
+            self.metadata.remove(str(path))
 
-    def copy(self, src: str, dst: str, follow_symlinks: bool = True) -> None:
-        """复制文件"""
+    def copy(self, src: PathLike, dst: PathLike, recursive: bool = False) -> None:
+        """复制文件或目录"""
         src_path = self._normalize_path(src)
         dst_path = self._normalize_path(dst)
         
         if not src_path.exists():
-            raise FileNotFoundError(f"源文件不存在: {src}")
-            
-        if src_path.is_file():
-            shutil.copy2(src_path, dst_path, follow_symlinks=follow_symlinks)
+            raise FileNotFoundError(f"源路径不存在: {src}")
+        if src_path.is_dir():
+            if not recursive:
+                raise IsADirectoryError(f"源是目录，需要设置recursive=True: {src}")
+            shutil.copytree(src_path, dst_path)
+            self._copy_metadata(str(src), str(dst))
         else:
-            raise IsADirectoryError(f"源路径是目录，请使用copytree: {src}")
-            
-        self._copy_metadata(src, dst)
+            shutil.copy2(src_path, dst_path)
+            self._copy_metadata(str(src), str(dst))
 
-    def copytree(self, src: str, dst: str, symlinks: bool = False, 
-                ignore=None, dirs_exist_ok: bool = False) -> None:
-        """递归复制目录"""
-        src_path = self._normalize_path(src)
-        dst_path = self._normalize_path(dst)
-        
-        if not src_path.is_dir():
-            raise NotADirectoryError(f"源路径不是目录: {src}")
-            
-        shutil.copytree(src_path, dst_path, symlinks=symlinks,
-                       ignore=ignore, dirs_exist_ok=dirs_exist_ok)
-                       
-        # 递归复制元数据
-        for root, dirs, files in os.walk(src_path):
-            rel_root = os.path.relpath(root, src_path)
-            for name in dirs + files:
-                src_rel = os.path.join(rel_root, name)
-                dst_rel = os.path.join(dst, os.path.relpath(src_rel, src))
-                self._copy_metadata(src_rel, dst_rel)
-
-    def move(self, src: str, dst: str) -> None:
+    def move(self, src: PathLike, dst: PathLike) -> None:
         """移动文件或目录"""
         src_path = self._normalize_path(src)
         dst_path = self._normalize_path(dst)
-        
         if not src_path.exists():
-            raise FileNotFoundError(f"源文件不存在: {src}")
-            
+            raise FileNotFoundError(f"源路径不存在: {src}")
         shutil.move(src_path, dst_path)
-        self._move_metadata(src, dst)
+        metadata = self.get_metadata(src)
+        if metadata:
+            metadata.path = str(dst)
+            self.metadata.upsert(metadata)
+            self.metadata.remove(str(src))
 
-    def remove(self, path: str) -> None:
-        """删除文件"""
+    # 信息查询
+    def get_metadata(self, path: PathLike) -> Optional[FileMetadata]:
+        """获取文件或目录的元数据"""
+        return self.metadata.get(str(path))
+
+    def list_dir(self, path: PathLike) -> List[str]:
+        """列出目录内容"""
         real_path = self._normalize_path(path)
-        
         if not real_path.exists():
-            raise FileNotFoundError(f"文件不存在: {path}")
-            
-        if real_path.is_dir():
-            raise IsADirectoryError(f"目标是目录，请使用rmtree: {path}")
-            
-        real_path.unlink()
-        self.metadata.remove_file(path)
-
-    def rmtree(self, path: str, ignore_errors: bool = False) -> None:
-        """递归删除目录"""
-        real_path = self._normalize_path(path)
-        
+            raise FileNotFoundError(f"目录不存在: {path}")
         if not real_path.is_dir():
-            raise NotADirectoryError(f"目标不是目录: {path}")
-            
-        # 先删除所有相关元数据
-        for root, dirs, files in os.walk(real_path):
-            rel_root = os.path.relpath(root, self.root)
-            for name in dirs + files:
-                rel_path = os.path.join(rel_root, name)
-                self.metadata.remove_file(rel_path)
-                
-        shutil.rmtree(real_path, ignore_errors=ignore_errors)
-        self.metadata.remove_file(path)
+            raise NotADirectoryError(f"不是目录: {path}")
+        
+        try:
+            return [item.name for item in real_path.iterdir()]
+        except PermissionError:
+            raise PermissionError(str(path), "read", "没有读取权限")
+        except OSError as e:
+            raise FileSystemError(f"列出目录内容失败: {e}")
 
-    def _update_metadata(self, path: str, file_type: FileType,
-                        owner: str, group: str, mode: tuple) -> None:
+    def exists(self, path: PathLike) -> bool:
+        """检查路径是否存在"""
+        real_path = self._normalize_path(path)
+        return real_path.exists()
+
+    def chmod(self, path: PathLike, mode: FileMode) -> None:
+        """修改文件或目录的权限模式"""
+        metadata = self.get_metadata(path)
+        if not metadata:
+            raise FileNotFoundError(str(path))
+        
+        metadata.user_perm = mode.user
+        metadata.group_perm = mode.group
+        metadata.other_perm = mode.other
+        self.metadata.upsert(metadata)
+
+    def chown(self, path: PathLike, owner: str, group: str) -> None:
+        """修改文件或目录的所有者和组"""
+        metadata = self.get_metadata(path)
+        if not metadata:
+            raise FileNotFoundError(str(path))
+        
+        metadata.owner = owner
+        metadata.group = group
+        self.metadata.upsert(metadata)
+
+    def get_type(self, path: PathLike) -> FileType:
+        """获取文件类型"""
+        real_path = self._normalize_path(path)
+        if not real_path.exists():
+            raise FileNotFoundError(f"路径不存在: {path}")
+        return FileType.DIRECTORY if real_path.is_dir() else FileType.REGULAR
+
+    # 辅助方法
+    def _remove_tree(self, path: Path) -> None:
+        """递归删除目录及其元数据
+        
+        使用深度优先遍历，确保先删除子项再删除父项
+        """
+        try:
+            # 收集所有需要删除的路径
+            paths_to_remove = []
+            for root, dirs, files in os.walk(path, topdown=False):
+                rel_root = os.path.relpath(root, self.root)
+                for name in files + dirs:
+                    paths_to_remove.append(os.path.join(rel_root, name))
+            
+            # 批量删除元数据
+            for p in paths_to_remove:
+                self.metadata.remove(p)
+            
+            # 删除文件系统内容
+            shutil.rmtree(path)
+            
+        except OSError as e:
+            raise FileSystemError(f"删除目录失败: {e}")
+
+    def _copy_metadata(self, src: str, dst: str) -> None:
+        """复制元数据，保持文件属性"""
+        try:
+            if metadata := self.get_metadata(src):
+                new_metadata = FileMetadata(
+                    path=dst,
+                    file_type=metadata.file_type,
+                    owner=metadata.owner,
+                    group=metadata.group,
+                    size=metadata.size,
+                    created_at=datetime.now(),
+                    modified_at=datetime.now(),
+                    user_perm=metadata.user_perm,
+                    group_perm=metadata.group_perm,
+                    other_perm=metadata.other_perm
+                )
+                self.metadata.upsert(new_metadata)
+        except Exception as e:
+            raise MetadataError(f"复制元数据失败: {e}")
+
+    def _update_metadata(self, path: PathLike, file_type: FileType,
+                        owner: str, group: str, mode: FileMode) -> None:
         """更新文件元数据"""
         real_path = self._normalize_path(path)
         now = datetime.now()
-        
         metadata = FileMetadata(
-            path=path,
+            path=str(path),
             file_type=file_type,
             owner=owner,
             group=group,
             size=real_path.stat().st_size if real_path.is_file() else None,
             created_at=now,
             modified_at=now,
-            user_perm=Permission.from_mode(mode[0]),
-            group_perm=Permission.from_mode(mode[1]),
-            other_perm=Permission.from_mode(mode[2])
+            user_perm=mode.user,
+            group_perm=mode.group,
+            other_perm=mode.other
         )
-        self.metadata.add_file(metadata)
+        self.metadata.upsert(metadata)
 
-    def _copy_metadata(self, src: str, dst: str) -> None:
-        """复制元数据"""
-        src_meta = self.metadata.get_file(src)
-        if src_meta:
-            dst_meta = FileMetadata(
-                path=dst,
-                file_type=src_meta.file_type,
-                owner=src_meta.owner,
-                group=src_meta.group,
-                size=self._normalize_path(dst).stat().st_size 
-                     if self._normalize_path(dst).is_file() else None,
-                created_at=datetime.now(),
-                modified_at=datetime.now(),
-                user_perm=src_meta.user_perm,
-                group_perm=src_meta.group_perm,
-                other_perm=src_meta.other_perm
-            )
-            self.metadata.add_file(dst_meta)
+    def __enter__(self) -> 'FSOperations':
+        """支持上下文管理器"""
+        return self
 
-    def _move_metadata(self, src: str, dst: str) -> None:
-        """移动元数据"""
-        self._copy_metadata(src, dst)
-        self.metadata.remove_file(src)
-
-    def get_metadata(self, path: str) -> Optional[FileMetadata]:
-        """获取文件或目录的元数据
-        
-        Args:
-            path: 文件或目录路径
-            
-        Returns:
-            FileMetadata: 如果存在则返回元数据对象，否则返回None
-        """
-        return self.metadata.get_file(path)
-    
-    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """清理资源"""
+        self._path_cache.clear()

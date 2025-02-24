@@ -1,45 +1,48 @@
 import aivfs
-from pathlib import Path
 
-# 初始化新的文件系统
-fs = aivfs.init(force=True)  # 强制创建新的文件系统
+def print_separator(title: str):
+    """打印分隔符和标题"""
+    print(f"\n{'-'*20}")
+    print(f"{title}:")
+    print(f"{'-'*20}")
 
-def print_metadata(path: str):
-    metadata = fs.get_metadata(path)
-    if metadata:
-        print(f"路径: {metadata.path}")
-        print(f"类型: {metadata.file_type}")
-        print(f"所有者: {metadata.owner}")
-        print(f"组: {metadata.group}")
-        print(f"大小: {metadata.size if metadata.size is not None else 'N/A'}")
-        print(f"创建时间: {metadata.created_at}")
-        print(f"修改时间: {metadata.modified_at}")
-        print(f"权限: {metadata.user_perm}-{metadata.group_perm}-{metadata.other_perm}")
-        print("-" * 50)
-    else:
-        print(f"未找到 {path} 的元数据")
+try:
+    # 初始化文件系统
+    fs = aivfs.init(force=True)
 
-# 创建一些测试文件和目录
-fs.create_file("/home/test.txt", "Hello World", owner="user1", group="users")
-fs.mkdir("/home/docs", owner="user1", group="users", exist_ok=True)
+    # 测试基本文件系统操作
+    print_separator("1. 测试基本功能")
+    print(f"根目录存在: {fs.exists('/')}")
+    print(f"根目录内容: {fs.list_dir('/')}")
 
-# 测试元数据
-print("根目录元数据:")
-print_metadata("/")
+    # 测试元数据操作
+    print_separator("2. 测试元数据")
+    root_meta = fs.get_metadata('/')
+    print(f"根目录元数据: {root_meta}")
 
-print("\n/home 目录元数据:")
-print_metadata("/home")
+    # 测试文件操作
+    print_separator("3. 测试文件操作")
+    fs.write_file('/test.txt', 'Hello, AIVFS!')
+    print(f"文件存在: {fs.exists('/test.txt')}")
+    print(f"文件内容: {fs.read_file('/test.txt')}")
 
-print("\n/home/test.txt 文件元数据:")
-print_metadata("/home/test.txt")
+    # 测试文件元数据
+    file_meta = fs.get_metadata('/test.txt')
+    print(f"文件大小: {file_meta.size} bytes")
+    print(f"文件所有者: {file_meta.owner}")
+    print(f"文件权限: {file_meta.user_perm}-{file_meta.group_perm}-{file_meta.other_perm}")
 
-print("\n/home/docs 目录元数据:")
-print_metadata("/home/docs")
+    # 测试目录操作
+    print_separator("4. 测试目录操作")
+    fs.mkdir('/home/user1', parents=True)
+    print(f"目录内容: {fs.list_dir('/home')}")  # 修复了括号匹配问题
 
-# 显示目录内容
-print("\n列出 /home 目录内容:")
-for entry in fs.metadata.list_dir("/home"):
-    print(f"- {entry.path} ({entry.file_type})")
+    # 测试异常处理
+    print_separator("5. 测试异常处理")
+    try:
+        fs.read_file('/nonexistent.txt')
+    except aivfs.FileNotFoundError as e:
+        print(f"预期的异常: {e}")
 
-
-
+except Exception as e:
+    print(f"\n错误: {type(e).__name__} - {e}")
